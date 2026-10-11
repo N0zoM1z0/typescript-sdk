@@ -11,6 +11,7 @@
  * - changed: first list is number, later lists are label; response stays {count:1}
  * - removed: first list includes pick, later lists do not
  * - notify: number schema, and the first tools/call is followed by tools/list_changed
+ * - rea: public 170-tool catalog; close_binary returns null except on the second call
  *
  * COLD_FILLERS (default 24) adds distinct output schemas that an eager compiler
  * would compile. COLD_BAD=1 adds an uncompilable output schema named "bad".
@@ -18,9 +19,10 @@
  */
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 const scenario = process.env.COLD_SCENARIO ?? 'number';
+const reaCatalog = scenario === 'rea' ? JSON.parse(readFileSync(new URL('./rea-170-tools.json', import.meta.url), 'utf8')) : undefined;
 const fillerCount = Number(process.env.COLD_FILLERS ?? '24');
 const includeBad = process.env.COLD_BAD === '1';
 const reportPath = process.env.COLD_REPORT;
@@ -72,6 +74,7 @@ let notifyAfterCall = scenario === 'notify';
 
 function catalog() {
     lists += 1;
+    if (reaCatalog) return reaCatalog.tools;
     const extra = [...fillers(), ...(includeBad ? [tool('bad', { type: 'object', $ref: 'https://example.invalid/missing.json' })] : [])];
     if (scenario === 'removed' && lists > 1) return extra;
     if (scenario === 'label' || (scenario === 'changed' && lists > 1)) {
@@ -84,6 +87,10 @@ let calls = 0;
 
 function callResult() {
     calls += 1;
+    if (reaCatalog) {
+        const structuredContent = { result: calls === 2 ? 0 : null };
+        return { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent };
+    }
     // After tools/list_changed, a payload the previous schema would reject shows
     // whether the client dropped the memoized validator.
     if (scenario === 'notify' && calls > 1) {

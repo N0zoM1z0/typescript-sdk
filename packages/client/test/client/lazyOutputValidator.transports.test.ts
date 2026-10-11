@@ -3,17 +3,19 @@
  * Compiler counts are Ajv2020 engine.compile on the default validator.
  */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Ajv2020 } from 'ajv/dist/2020.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Client } from '../../src/client/client';
 import { getDefaultEnvironment, StdioClientTransport } from '../../src/client/stdio';
 import { StreamableHTTPClientTransport } from '../../src/client/streamableHttp';
+import { AjvJsonSchemaValidator } from '../../src/validators/ajv';
 
 const fixture = fileURLToPath(new URL('fixtures/cold-output-server.mjs', import.meta.url));
 
@@ -51,6 +53,53 @@ describe('local stdio and HTTP callTool', () => {
         spy = undefined;
         for (const child of children) child.kill('SIGKILL');
         children.length = 0;
+    });
+
+    it('stdio: the public REA catalog prepares only the called validator and still rejects invalid output', async () => {
+        const bytes = readFileSync(new URL('fixtures/rea-170-tools.json', import.meta.url));
+        expect(createHash('sha256').update(bytes).digest('hex')).toBe('badac148871025e4ac3f4b71c8914c25b4d32d973d07a28f60ed799764906f2b');
+        const catalog = JSON.parse(bytes.toString('utf8'));
+        spy = spyAjvCompile();
+        const validator = new AjvJsonSchemaValidator();
+        const prepare = vi.spyOn(validator, 'getValidator');
+        const mcp = new Client({ name: 'rea-catalog-client', version: '1.0.0' }, { jsonSchemaValidator: validator });
+        const transport = new StdioClientTransport({
+            command: process.execPath,
+            args: [fixture, 'stdio'],
+            env: { ...getDefaultEnvironment(), COLD_SCENARIO: 'rea' },
+            stderr: 'pipe'
+        });
+
+        try {
+            await mcp.connect(transport);
+            const listed = await mcp.listTools();
+            expect(listed.tools).toEqual(catalog.tools);
+            expect(listed.tools).toHaveLength(170);
+            expect(listed.tools.filter(tool => tool.outputSchema !== undefined)).toHaveLength(170);
+            expect(prepare).not.toHaveBeenCalled();
+            expect(spy.compiles).toBe(0);
+
+            await expect(mcp.callTool({ name: 'close_binary', arguments: {} })).resolves.toMatchObject({
+                structuredContent: { result: null }
+            });
+            expect(prepare).toHaveBeenCalledTimes(1);
+            expect(spy.compiles).toBe(1);
+
+            await expect(mcp.callTool({ name: 'close_binary', arguments: {} })).rejects.toThrow(/does not match the tool's output schema/);
+            await expect(mcp.callTool({ name: 'close_binary', arguments: {} })).resolves.toMatchObject({
+                structuredContent: { result: null }
+            });
+            expect(prepare).toHaveBeenCalledTimes(1);
+            expect(spy.compiles).toBe(1);
+
+            await mcp.listTools();
+            await mcp.callTool({ name: 'close_binary', arguments: {} });
+            expect(prepare).toHaveBeenCalledTimes(2);
+            expect(spy.compiles).toBe(1);
+        } finally {
+            await mcp.close();
+            await transport.close();
+        }
     });
 
     it('stdio: one ordinary call compiles only pick, including an uncalled bad schema', async () => {
